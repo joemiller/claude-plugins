@@ -7,11 +7,6 @@
       "name": "review",
       "source": "./plugins/review",
       "description": "Multi-model code review with cross-validation"
-    },
-    {
-      "name": "pr-review",
-      "source": "./plugins/pr-review",
-      "description": "Multi-model PR code review with cross-validation"
     }
   ]
 }

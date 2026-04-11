@@ -1,5 +1,0 @@
-{
-  "name": "pr-review",
-  "description": "Multi-model PR code review. Clones the PR repo to a temp dir, runs Claude and Codex reviews in parallel, then cross-validates findings.",
-  "version": "0.1.0"
-}

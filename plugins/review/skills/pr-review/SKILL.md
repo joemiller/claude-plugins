@@ -121,7 +121,7 @@ one before starting the other.
 #### Claude Review
 
 Dispatch the plugin's reviewer agent
-(`subagent_type: "pr-review:reviewer"`) with
+(`subagent_type: "review:reviewer"`) with
 `mode: "bypassPermissions"`.
 
 Prompt:
@@ -200,20 +200,23 @@ PROMPT
 
 The agent should return the codex output as-is.
 
-If `codex exec` fails or is not available, read
-`/tmp/codex-review-stderr.log` for the error reason.
-Include the error in the warning, then proceed in
-claude-only mode.
+If `codex exec` fails or is not available:
+1. Read the file `/tmp/codex-review-stderr.log`
+   using the Read tool
+2. Include the error content in the final report
+   header as a warning line
+3. Proceed without codex findings — the judge still
+   runs on Claude's findings alone
 
 ### Step 3: Judge
 
 Skip this step if ANY of:
 - `--quick` flag is set
-- Operating in claude-only mode
 - Both reviewers returned `NO_FINDINGS`
+- Only one reviewer ran AND it returned `NO_FINDINGS`
 
 Dispatch the plugin's judge agent
-(`subagent_type: "pr-review:judge"`) with
+(`subagent_type: "review:judge"`) with
 `mode: "bypassPermissions"`.
 
 Prompt:
@@ -266,9 +269,7 @@ structured output. Counts should reflect post-filter
 totals. For the judge's output, count findings by
 STATUS and CONFIRMED_BY fields.
 
-#### Full Mode (judge ran)
-
-Parse the judge's structured findings and render:
+Render the report as:
 
     ## Review: <owner>/<repo> PR #<number> (<head-branch>)
 
@@ -291,6 +292,16 @@ Parse the judge's structured findings and render:
 
     *Confirmed by both reviewers*
 
+If codex failed, add a `WARNING:` line after the
+title with the error from `/tmp/codex-review-stderr.log`.
+Omit the `Codex findings:` count.
+
+If `--quick`, append `[quick]` to the heading and
+omit the Status column (there is no judge output).
+
+If no findings survived filtering, just display:
+`No material issues found.`
+
 Status column mapping from judge's structured output:
 - STATUS=confirmed, CONFIRMED_BY=both → `✓ both`
 - STATUS=confirmed, CONFIRMED_BY=claude → `✓ claude`
@@ -306,63 +317,6 @@ Status line in italics after each finding:
 - `*Found by codex, confirmed by judge*`
 - `*Disputed: <reason from DETAIL>*`
 - `*Uncertain: <reason from DETAIL>*`
-
-If the judge returned NO_FINDINGS, display:
-
-    ## Review: <owner>/<repo> PR #<number> (<head-branch>)
-
-    **<PR title>**
-
-    No material issues found.
-
-#### Quick Mode (`--quick`)
-
-Skip the judge. Parse both reviewers' structured
-findings directly and render:
-
-    ## Review: <owner>/<repo> PR #<number> [quick]
-
-    **<PR title>**
-
-    Scope: origin/<base>...<head-branch>
-    Claude findings: <n> | Codex findings: <n>
-    Note: cross-validation skipped
-
-    ### Claude
-
-    | # | Sev | File | Issue |
-    |---|-----|------|-------|
-    (table from Claude findings)
-
-    (detailed findings from Claude)
-
-    ### Codex
-
-    | # | Sev | File | Issue |
-    |---|-----|------|-------|
-    (table from Codex findings)
-
-    (detailed findings from Codex)
-
-#### Claude-Only Mode
-
-Skip the judge. Parse Claude's structured findings
-and render:
-
-    ## Review: <owner>/<repo> PR #<number> [claude-only]
-
-    WARNING: Codex unavailable — single-model review.
-
-    **<PR title>**
-
-    Scope: origin/<base>...<head-branch>
-    Claude findings: <n>
-
-    | # | Sev | File | Issue |
-    |---|-----|------|-------|
-    (table from Claude findings)
-
-    (detailed findings from Claude)
 
 ### Step 5: Cleanup
 

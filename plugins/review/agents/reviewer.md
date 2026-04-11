@@ -12,6 +12,13 @@ find material issues — things that are expensive,
 dangerous, or hard to detect. Do NOT report style,
 naming, or speculative concerns.
 
+## Working Directory
+
+If the scope brief includes a "Working directory"
+field, use it as the base for ALL operations:
+- Read/Grep/Glob: use absolute paths rooted there
+- Git commands: use `git -C <working directory>`
+
 ## Rules
 
 - Do NOT modify any files

@@ -182,8 +182,8 @@ claude-only mode.
 
 Skip this step if ANY of:
 - `--quick` flag is set
-- Operating in claude-only mode
 - Both reviewers returned `NO_FINDINGS`
+- Only one reviewer ran AND it returned `NO_FINDINGS`
 
 Dispatch the plugin's judge agent
 (`subagent_type: "review:judge"`) with
@@ -226,9 +226,7 @@ Count findings from each source by reading the
 structured output. For the judge's output, count
 findings by STATUS and CONFIRMED_BY fields.
 
-#### Full Mode (judge ran)
-
-Parse the judge's structured findings and render:
+Render the report as:
 
     ## Review: <REPO> (<BRANCH>)
 
@@ -249,6 +247,16 @@ Parse the judge's structured findings and render:
 
     *Confirmed by both reviewers*
 
+If codex failed, add a `WARNING:` line after the
+heading with the error from `/tmp/codex-review-stderr.log`.
+Omit the `Codex findings:` count.
+
+If `--quick`, append `[quick]` to the heading and
+omit the Status column (there is no judge output).
+
+If no findings survived, just display:
+`No material issues found.`
+
 Status column mapping from judge's structured output:
 - STATUS=confirmed, CONFIRMED_BY=both → `✓ both`
 - STATUS=confirmed, CONFIRMED_BY=claude → `✓ claude`
@@ -264,56 +272,3 @@ Status line in italics after each finding:
 - `*Found by codex, confirmed by judge*`
 - `*Disputed: <reason from DETAIL>*`
 - `*Uncertain: <reason from DETAIL>*`
-
-If the judge returned NO_FINDINGS, display:
-
-    ## Review: <REPO> (<BRANCH>)
-
-    Scope: <scope description>
-
-    No material issues found.
-
-#### Quick Mode (`--quick`)
-
-Skip the judge. Parse both reviewers' structured
-findings directly and render:
-
-    ## Review: <REPO> (<BRANCH>) [quick]
-
-    Scope: <scope description>
-    Claude findings: <n> | Codex findings: <n>
-    Note: cross-validation skipped
-
-    ### Claude
-
-    | # | Sev | File | Issue |
-    |---|-----|------|-------|
-    (table from Claude findings)
-
-    (detailed findings from Claude)
-
-    ### Codex
-
-    | # | Sev | File | Issue |
-    |---|-----|------|-------|
-    (table from Codex findings)
-
-    (detailed findings from Codex)
-
-#### Claude-Only Mode
-
-Skip the judge. Parse Claude's structured findings
-and render:
-
-    ## Review: <REPO> (<BRANCH>) [claude-only]
-
-    WARNING: Codex unavailable — single-model review.
-
-    Scope: <scope description>
-    Claude findings: <n>
-
-    | # | Sev | File | Issue |
-    |---|-----|------|-------|
-    (table from Claude findings)
-
-    (detailed findings from Claude)
