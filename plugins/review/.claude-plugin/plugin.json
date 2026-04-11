@@ -1,0 +1,5 @@
+{
+  "name": "review",
+  "description": "Multi-model code review with cross-validation. Runs Claude and Codex reviews in parallel, then cross-validates findings.",
+  "version": "0.1.0"
+}
