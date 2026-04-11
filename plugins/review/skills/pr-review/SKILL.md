@@ -3,33 +3,28 @@ description: "Multi-model PR code review with cross-validation"
 allowed-tools: Bash(git:*), Bash(gh:*), Bash(codex:*), Bash(mktemp:*), Bash(rm:*), Agent
 ---
 
-# /pr-review:pr-review
+# Review a GitHub pull request with parallel reviewers and cross-validation.
 
-Independent reviews from Claude and Codex on a
-GitHub pull request, cross-validated, merged into
-a single report.
+## Overview
 
-## Input
+Clones a PR to a temp directory, dispatches two
+independent reviewers (Claude and Codex) in parallel,
+then a judge agent validates and deduplicates
+findings. Always clones fresh — never checks out
+branches in the user's working tree. You are a pure
+dispatcher — you do not review code, edit files, or
+inject your own opinions.
 
-PR: $ARGUMENTS
+## Prerequisites
 
-Required: a GitHub PR URL.
-Example: `https://github.com/owner/repo/pull/123`
+- `gh` — used for PR metadata, cloning, and checkout
+- `git` — diff computation and scope resolution
+- `codex` — optional; if unavailable, proceeds with
+  Claude-only findings
+- `review-focus:` in the cloned repo's CLAUDE.md —
+  optional; if present, injected into reviewer prompts
 
-Flags:
-- `--quick` — skip cross-validation, return the
-  union of both reviews
-
-## The Rule
-
-You are a PURE DISPATCHER. You do not review code.
-You launch agents, collect output, and format results.
-Do not edit source files. Do not fix issues. Do not
-inject your own review opinions into the output.
-
----
-
-## Pipeline
+## Instructions
 
 ### Step 1: Setup and Scope
 
@@ -44,26 +39,12 @@ Extract PR metadata:
 gh pr view <URL> --json number,title,body,baseRefName,headRefName,headRepository,headRepositoryOwner
 ```
 
-From the JSON response extract:
-- PR number, title, body (description)
-- Base branch name and head branch name
-- Repository clone URL (construct from
-  headRepositoryOwner and headRepository)
-
 Clone to a temp directory:
 
 ```
 mktemp -d /tmp/pr-review-XXXXXX
-```
-
-```
 gh repo clone <owner>/<repo> <temp-dir>/<repo> -- --depth=50
 ```
-
-Use `--depth=50` to keep the clone fast while
-having enough history for the diff. If the PR has
-more than 50 commits this is still fine — the diff
-range will work with the available history.
 
 Checkout the PR:
 
@@ -72,19 +53,13 @@ git -C <temp-dir>/<repo> fetch origin pull/<number>/head:pr-<number> && \
 git -C <temp-dir>/<repo> checkout pr-<number>
 ```
 
-Compute the diff range. The base branch is from
-the PR metadata. Use:
-
-```
-git -C <temp-dir>/<repo> diff origin/<base>...HEAD --stat
-git -C <temp-dir>/<repo> diff origin/<base>...HEAD --name-only
-```
-
-If either fails (e.g., shallow clone missing the
-base), fetch the base and retry:
+Compute the diff. If the base branch is missing from
+the shallow clone, fetch it first:
 
 ```
 git -C <temp-dir>/<repo> fetch origin <base> --depth=50
+git -C <temp-dir>/<repo> diff origin/<base>...HEAD --stat
+git -C <temp-dir>/<repo> diff origin/<base>...HEAD --name-only
 ```
 
 Build the **scope brief**:
@@ -100,29 +75,17 @@ Files:
 
 Diff stat:
 <git diff --stat output>
-```
 
-If the PR body is non-empty, include it:
-
-```
 PR description:
-<body, truncated to 500 chars if longer>
+<body, truncated to 500 chars if non-empty>
 ```
-
-Check for `review-focus:` in a CLAUDE.md at the
-repo root inside the clone. If present, note it
-for injection into review prompts.
 
 ### Step 2: Launch Parallel Reviews
 
-Launch both reviews simultaneously. Do not wait for
-one before starting the other.
+Launch both reviews simultaneously.
 
-#### Claude Review
-
-Dispatch the plugin's reviewer agent
-(`subagent_type: "review:reviewer"`) with
-`mode: "bypassPermissions"`.
+**Claude:** Dispatch `subagent_type: "review:reviewer"`
+with `mode: "bypassPermissions"`.
 
 Prompt:
 ```
@@ -138,18 +101,9 @@ and git -C for all git commands.
 Project review focus (prioritize these): <FOCUS>
 ```
 
-The agent's system prompt already contains the review
-focus categories, evidence standard, and output
-schema. Pass only the scope brief and any
-project-specific focus. The agent will read the
-actual code itself.
-
-#### Codex Review
-
-Dispatch an Agent subagent with
+**Codex:** Dispatch an Agent subagent with
 `mode: "bypassPermissions"` and
-`allowed-tools: Bash(codex:*)` that runs a single
-Bash call:
+`allowed-tools: Bash(codex:*)` that runs:
 
 ```bash
 codex exec -m gpt-5.4 \
@@ -198,25 +152,12 @@ If there are no material findings, return:
 PROMPT
 ```
 
-The agent should return the codex output as-is.
-
-If `codex exec` fails or is not available:
-1. Read the file `/tmp/codex-review-stderr.log`
-   using the Read tool
-2. Include the error content in the final report
-   header as a warning line
-3. Proceed without codex findings — the judge still
-   runs on Claude's findings alone
-
 ### Step 3: Judge
 
-Skip this step if ANY of:
-- `--quick` flag is set
-- Both reviewers returned `NO_FINDINGS`
-- Only one reviewer ran AND it returned `NO_FINDINGS`
+Skip if `--quick` is set, or all reviewers that ran
+returned `NO_FINDINGS`.
 
-Dispatch the plugin's judge agent
-(`subagent_type: "review:judge"`) with
+Dispatch `subagent_type: "review:judge"` with
 `mode: "bypassPermissions"`.
 
 Prompt:
@@ -242,34 +183,28 @@ commands.
 <CODEX FINDINGS>
 ```
 
-The judge agent's system prompt contains the
-validation rules, dedup logic, and output schema.
-Pass only the scope brief and both sets of findings.
 The judge returns structured FINDING blocks, not
 formatted markdown.
 
-### Step 4: Format and Present
+### Step 4: Cleanup
 
-You are responsible for ALL formatting. The reviewer
-and judge agents return structured text (FINDING /
-FILE / LINES / etc. blocks). You parse these and
-render the final markdown report.
+Remove the temp directory:
 
-Filter out low severity findings — only present high
-and medium. Also filter out disputed findings. This
-keeps PR reviews focused on what matters for the
-merge decision.
+```
+rm -rf <temp-dir>
+```
 
-In the rendered output, FILE paths should be
-**relative to the repo root**, not absolute paths.
-Strip the temp directory prefix.
+## Output Format
 
-Count findings from each source by reading the
-structured output. Counts should reflect post-filter
-totals. For the judge's output, count findings by
-STATUS and CONFIRMED_BY fields.
+You are responsible for ALL formatting. Agents
+return structured text (FINDING / FILE / LINES /
+etc. blocks). Parse these and render markdown.
 
-Render the report as:
+Strip the temp directory prefix from all file paths —
+render paths relative to the repo root.
+
+Filter out low severity and disputed findings. Only
+present high and medium severity.
 
     ## Review: <owner>/<repo> PR #<number> (<head-branch>)
 
@@ -292,36 +227,48 @@ Render the report as:
 
     *Confirmed by both reviewers*
 
-If codex failed, add a `WARNING:` line after the
-title with the error from `/tmp/codex-review-stderr.log`.
-Omit the `Codex findings:` count.
+**Status column** (from judge's STATUS/CONFIRMED_BY):
+- confirmed + both → `✓ both`
+- confirmed + claude → `✓ claude`
+- confirmed + codex → `✓ codex`
+- disputed → `✗ disputed`
+- uncertain → `? uncertain`
 
-If `--quick`, append `[quick]` to the heading and
-omit the Status column (there is no judge output).
+**Severity column:** high, med, low.
 
-If no findings survived filtering, just display:
-`No material issues found.`
+**Status line** (italics, after each finding):
+- *Confirmed by both reviewers*
+- *Found by claude, confirmed by judge*
+- *Found by codex, confirmed by judge*
+- *Disputed: reason*
+- *Uncertain: reason*
 
-Status column mapping from judge's structured output:
-- STATUS=confirmed, CONFIRMED_BY=both → `✓ both`
-- STATUS=confirmed, CONFIRMED_BY=claude → `✓ claude`
-- STATUS=confirmed, CONFIRMED_BY=codex → `✓ codex`
-- STATUS=disputed → `✗ disputed`
-- STATUS=uncertain → `? uncertain`
+**Variations:**
+- `--quick`: append `[quick]` to heading, omit
+  Status column (no judge ran)
+- Codex failed: add `WARNING:` line after title,
+  omit `Codex findings:` count
+- No findings: display `No material issues found.`
 
-Severity column: high, med, low.
+## Error Handling
 
-Status line in italics after each finding:
-- `*Confirmed by both reviewers*`
-- `*Found by claude, confirmed by judge*`
-- `*Found by codex, confirmed by judge*`
-- `*Disputed: <reason from DETAIL>*`
-- `*Uncertain: <reason from DETAIL>*`
+**Codex failure:** Read `/tmp/codex-review-stderr.log`
+for the error. Include it as a `WARNING:` line in
+the report header. The judge still runs on Claude's
+findings alone.
 
-### Step 5: Cleanup
+**Invalid input:** If the argument is not a GitHub
+PR URL, tell the user and stop. Do not launch agents.
 
-After presenting results, remove the temp directory:
+**Shallow clone missing base:** Fetch the base branch
+with `--depth=50` and retry the diff.
 
-```
-rm -rf <temp-dir>
-```
+**Cleanup on failure:** Always remove the temp
+directory, even if the review pipeline fails.
+
+## Examples
+
+Input: `/review:pr-review https://github.com/org/repo/pull/42`
+
+Input: `/review:pr-review --quick https://github.com/org/repo/pull/42`
+(skip judge, return raw union of findings)

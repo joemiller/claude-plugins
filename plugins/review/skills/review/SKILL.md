@@ -3,38 +3,25 @@ description: "Multi-model code review with cross-validation"
 allowed-tools: Bash(git:*), Bash(codex:*), Agent
 ---
 
-# /review:review
+# Run parallel code reviews with cross-validation.
 
-Independent reviews from Claude and Codex,
-cross-validated, merged into a single report.
+## Overview
 
-## Input
+Dispatches two independent reviewers (Claude and
+Codex) in parallel on the same code, then a judge
+agent validates and deduplicates findings. You are
+a pure dispatcher — you do not review code, edit
+files, or inject your own opinions.
 
-Scope: $ARGUMENTS
+## Prerequisites
 
-Default (no arguments): all uncommitted changes
-(`git diff HEAD`).
+- `git` — all scope resolution uses git commands
+- `codex` — optional; if unavailable, proceeds with
+  Claude-only findings
+- `review-focus:` in project CLAUDE.md — optional;
+  if present, injected into reviewer prompts
 
-Accepted scope forms:
-- File path: `src/server.zig`
-- Multiple files: `src/server.zig src/client.zig`
-- Git range: `HEAD~3..HEAD`
-- Freeform: `last 2 commits`, `staged changes`
-
-Flags:
-- `--quick` — skip cross-validation, return the
-  union of both reviews
-
-## The Rule
-
-You are a PURE DISPATCHER. You do not review code.
-You launch agents, collect output, and format results.
-Do not edit source files. Do not fix issues. Do not
-inject your own review opinions into the output.
-
----
-
-## Pipeline
+## Instructions
 
 ### Step 1: Determine Scope
 
@@ -49,37 +36,32 @@ Translate freeform scope to git commands:
 - File paths → use as-is
 - Git ranges → use as-is
 
-Gather repo info by running these git commands:
+Gather repo info:
 - `git rev-parse --show-toplevel` — extract the
   repo name from the last path component
 - `git branch --show-current`
 
-Resolve the scope to a **file list** and **diff stat**.
-Pick the right git command based on scope type:
-
+Resolve the scope to a **file list** and **diff stat**:
 - Uncommitted changes: `git diff HEAD`
 - Staged: `git diff --cached`
 - Git range: `git diff <range>`
 - File paths: skip diff, just use the paths
 - No commits yet: `git ls-files`
 
-Run `git diff --stat <scope>` to get the diff stat
-summary. Run `git diff --name-only <scope>` to get
-the file list. For file-path scope or no-commits
-repos, the file list is the paths themselves and
-there is no diff stat.
+Run `git diff --stat <scope>` and
+`git diff --name-only <scope>`. For file-path scope
+or no-commits repos, the file list is the paths
+themselves and there is no diff stat.
 
 If both are empty, tell the user there is nothing
 to review and stop.
 
-Build a **scope brief** that will be passed to all
-reviewers and validators:
+Build a **scope brief**:
 
 ```
 Repository: <REPO>
 Branch: <BRANCH>
-Scope: <human-readable description, e.g. "uncommitted
-       changes" or "HEAD~3..HEAD">
+Scope: <human-readable description>
 Files:
 <file list, one per line>
 
@@ -87,19 +69,12 @@ Diff stat:
 <git diff --stat output, if available>
 ```
 
-Check for `review-focus:` in the project's CLAUDE.md.
-If present, note it for injection into review prompts.
-
 ### Step 2: Launch Parallel Reviews
 
-Launch both reviews simultaneously. Do not wait for
-one before starting the other.
+Launch both reviews simultaneously.
 
-#### Claude Review
-
-Dispatch the plugin's reviewer agent
-(`subagent_type: "review:reviewer"`) with
-`mode: "bypassPermissions"`.
+**Claude:** Dispatch `subagent_type: "review:reviewer"`
+with `mode: "bypassPermissions"`.
 
 Prompt:
 ```
@@ -113,18 +88,9 @@ context.
 Project review focus (prioritize these): <FOCUS>
 ```
 
-The agent's system prompt already contains the review
-focus categories, evidence standard, and output
-schema. Pass only the scope brief and any
-project-specific focus. The agent will read the
-actual code itself.
-
-#### Codex Review
-
-Dispatch an Agent subagent with
+**Codex:** Dispatch an Agent subagent with
 `mode: "bypassPermissions"` and
-`allowed-tools: Bash(codex:*)` that runs a single
-Bash call:
+`allowed-tools: Bash(codex:*)` that runs:
 
 ```bash
 codex exec -m gpt-5.4 \
@@ -171,22 +137,12 @@ If there are no material findings, return:
 PROMPT
 ```
 
-The agent should return the codex output as-is.
-
-If `codex exec` fails or is not available, read
-`/tmp/codex-review-stderr.log` for the error reason.
-Include the error in the warning, then proceed in
-claude-only mode.
-
 ### Step 3: Judge
 
-Skip this step if ANY of:
-- `--quick` flag is set
-- Both reviewers returned `NO_FINDINGS`
-- Only one reviewer ran AND it returned `NO_FINDINGS`
+Skip if `--quick` is set, or all reviewers that ran
+returned `NO_FINDINGS`.
 
-Dispatch the plugin's judge agent
-(`subagent_type: "review:judge"`) with
+Dispatch `subagent_type: "review:judge"` with
 `mode: "bypassPermissions"`.
 
 Prompt:
@@ -209,24 +165,14 @@ finding against the actual code.
 <CODEX FINDINGS>
 ```
 
-The judge agent's system prompt contains the
-validation rules, dedup logic, and output schema.
-Pass only the scope brief and both sets of findings.
 The judge returns structured FINDING blocks, not
 formatted markdown.
 
-### Step 4: Format and Present
+## Output Format
 
-You are responsible for ALL formatting. The reviewer
-and judge agents return structured text (FINDING /
-FILE / LINES / etc. blocks). You parse these and
-render the final markdown report.
-
-Count findings from each source by reading the
-structured output. For the judge's output, count
-findings by STATUS and CONFIRMED_BY fields.
-
-Render the report as:
+You are responsible for ALL formatting. Agents
+return structured text (FINDING / FILE / LINES /
+etc. blocks). Parse these and render markdown.
 
     ## Review: <REPO> (<BRANCH>)
 
@@ -247,28 +193,46 @@ Render the report as:
 
     *Confirmed by both reviewers*
 
-If codex failed, add a `WARNING:` line after the
-heading with the error from `/tmp/codex-review-stderr.log`.
-Omit the `Codex findings:` count.
+**Status column** (from judge's STATUS/CONFIRMED_BY):
+- confirmed + both → `✓ both`
+- confirmed + claude → `✓ claude`
+- confirmed + codex → `✓ codex`
+- disputed → `✗ disputed`
+- uncertain → `? uncertain`
 
-If `--quick`, append `[quick]` to the heading and
-omit the Status column (there is no judge output).
+**Severity column:** high, med, low.
 
-If no findings survived, just display:
-`No material issues found.`
+**Status line** (italics, after each finding):
+- *Confirmed by both reviewers*
+- *Found by claude, confirmed by judge*
+- *Found by codex, confirmed by judge*
+- *Disputed: reason*
+- *Uncertain: reason*
 
-Status column mapping from judge's structured output:
-- STATUS=confirmed, CONFIRMED_BY=both → `✓ both`
-- STATUS=confirmed, CONFIRMED_BY=claude → `✓ claude`
-- STATUS=confirmed, CONFIRMED_BY=codex → `✓ codex`
-- STATUS=disputed → `✗ disputed`
-- STATUS=uncertain → `? uncertain`
+**Variations:**
+- `--quick`: append `[quick]` to heading, omit
+  Status column (no judge ran)
+- Codex failed: add `WARNING:` line after heading,
+  omit `Codex findings:` count
+- No findings: display `No material issues found.`
 
-Severity column: high, med, low.
+## Error Handling
 
-Status line in italics after each finding:
-- `*Confirmed by both reviewers*`
-- `*Found by claude, confirmed by judge*`
-- `*Found by codex, confirmed by judge*`
-- `*Disputed: <reason from DETAIL>*`
-- `*Uncertain: <reason from DETAIL>*`
+**Codex failure:** Read `/tmp/codex-review-stderr.log`
+for the error. Include it as a `WARNING:` line in
+the report header. The judge still runs on Claude's
+findings alone.
+
+**Empty scope:** Tell the user there is nothing to
+review and stop. Do not launch any agents.
+
+## Examples
+
+Input: `/review:review`
+(no args → reviews all uncommitted changes)
+
+Input: `/review:review HEAD~3..HEAD`
+(reviews last 3 commits)
+
+Input: `/review:review --quick src/server.go`
+(quick review of one file, no judge)
