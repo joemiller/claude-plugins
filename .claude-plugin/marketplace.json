@@ -1,6 +1,8 @@
 {
   "name": "joemiller-plugins",
-  "owner": "Joe Miller",
+  "owner": {
+    "name": "Joe Miller"
+  },
   "description": "Personal Claude Code plugins",
   "plugins": [
     {
