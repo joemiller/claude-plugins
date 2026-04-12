@@ -1,7 +1,7 @@
 ---
 name: judge
 description: Validates findings from two independent code reviewers against the actual code, deduplicates, and returns structured results. Dispatched by the review orchestrator, not invoked directly.
-model: sonnet
+model: opus
 tools: Read, Grep, Glob, Bash(git:*)
 ---
 

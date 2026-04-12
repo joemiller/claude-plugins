@@ -1,6 +1,6 @@
 ---
 description: "Multi-model code review with cross-validation"
-allowed-tools: Bash(git:*), Bash(gh:*), Bash(${CLAUDE_SKILL_DIR}/scripts/shuffle-diff.sh:*), Bash(shuf:*), Bash(mkdir:/tmp/review-skill), Bash(mktemp:*), Bash(rm:/tmp/review-skill/*), Agent
+allowed-tools: Bash(git:*), Bash(gh:*), Bash(mkdir:/tmp/review-skill), Bash(mktemp:*), Bash(rm:/tmp/review-skill/review-*), Write(/tmp/review-skill/*), Agent
 ---
 
 # Run parallel code reviews with cross-validation.
@@ -23,7 +23,9 @@ the user's working tree.
 ## Prerequisites
 
 - `git` — all scope resolution uses git commands
-- `shuf` — randomizes file ordering per agent (coreutils)
+- `shuf` — randomizes file ordering per agent
+  (coreutils, used by shuffle-diff.sh)
+- `jq` — JSON processing (used by setup-pr.sh)
 - `codex` — optional; if unavailable, proceeds with
   Claude-only findings
 - `gh` — required for PR mode only (metadata, clone)
@@ -47,6 +49,17 @@ Parse `$ARGUMENTS`:
 GitHub PR URL, this is **PR mode**. Otherwise it is
 **local mode** (remaining text is the scope; if
 empty, default to `git diff HEAD`).
+
+Create a temp directory (used by both modes):
+
+```
+mkdir -p /tmp/review-skill && mktemp -d /tmp/review-skill/review-XXXXXX
+```
+
+Record as `TEMP_DIR`. This is the ONLY directory you
+use for all temp files throughout the entire review.
+Do NOT create any other directories. All temp files
+(diffs, prompts, etc.) go directly into `TEMP_DIR`.
 
 #### Local Mode
 
@@ -76,14 +89,7 @@ themselves and there is no diff stat.
 If both are empty, tell the user there is nothing
 to review and stop.
 
-Create a temp directory:
-
-```
-mkdir -p /tmp/review-skill && mktemp -d /tmp/review-skill/review-XXXXXX
-```
-
 Record for later steps:
-- `TEMP_DIR` = the temp directory created above
 - `WORK_DIR` = repo root (from `git rev-parse --show-toplevel`)
 - `DIFF_CMD` = `git diff <scope>` (the resolved
   git diff command)
@@ -94,53 +100,41 @@ Record for later steps:
 
 #### PR Mode
 
-Extract PR metadata:
+Run the setup script:
 
 ```
-gh pr view <URL> --json number,title,body,baseRefName,headRefName,headRepository,headRepositoryOwner
+${CLAUDE_SKILL_DIR}/scripts/setup-pr.sh <TEMP_DIR> <URL>
 ```
 
-Clone to a temp directory:
+Parse the JSON output and record all fields for
+later steps. If the script exits non-zero, show the
+error to the user and stop. If `file_count` is 0,
+tell the user there is nothing to review and stop.
 
-```
-mkdir -p /tmp/review-skill && mktemp -d /tmp/review-skill/review-XXXXXX
-gh repo clone <owner>/<repo> <TEMP_DIR>/<repo> -- --depth=50
-```
-
-Checkout the PR:
-
-```
-git -C <TEMP_DIR>/<repo> fetch origin pull/<number>/head:pr-<number> && \
-git -C <TEMP_DIR>/<repo> checkout pr-<number>
-```
-
-Resolve the merge base from GitHub and fetch it:
-
-```
-gh api repos/<owner>/<repo>/compare/<base>...<head> \
-  --jq '.merge_base_commit.sha'
-git -C <TEMP_DIR>/<repo> fetch --depth=1 origin <merge_base_sha>
-```
-
-Generate diff stat and file list using the merge
-base SHA (two-dot diff — no merge-base computation
-needed locally):
-
-```
-git -C <TEMP_DIR>/<repo> diff <merge_base_sha>..HEAD --stat
-git -C <TEMP_DIR>/<repo> diff <merge_base_sha>..HEAD --name-only
-```
+The JSON output contains:
+- `temp_dir`, `work_dir` — paths
+- `repo_label`, `branch_label`, `scope_description`
+- `diff_cmd_args` — everything after `git` in the
+  diff command (pass to `shuffle-diff.sh`)
+- `git_prefix` — for agent prompts
+- `pr_title`, `pr_description`, `pr_number`,
+  `pr_owner`, `pr_repo`
+- `head_sha`, `merge_base_sha`
+- `diff_stat`, `file_list`, `file_count`
 
 Record for later steps:
-- `TEMP_DIR` = the temp directory created above
-- `WORK_DIR` = `<TEMP_DIR>/<repo>`
-- `DIFF_CMD` = `git -C <TEMP_DIR>/<repo> diff <merge_base_sha>..HEAD`
-- `GIT_PREFIX` = `git -C <TEMP_DIR>/<repo>`
-- `REPO_LABEL` = `<owner>/<repo>`
-- `BRANCH_LABEL` = `<head-branch> (PR #<number>)`
-- `SCOPE_DESCRIPTION` = `<merge_base_sha>..HEAD`
-- `PR_TITLE` = title from metadata
-- `PR_DESCRIPTION` = body from metadata
+- `WORK_DIR` = `work_dir` from JSON
+- `DIFF_CMD` = `git` + `diff_cmd_args` from JSON
+- `GIT_PREFIX` = `git_prefix` from JSON
+- `REPO_LABEL` = `repo_label` from JSON
+- `BRANCH_LABEL` = `branch_label` from JSON
+- `SCOPE_DESCRIPTION` = `scope_description` from JSON
+- `PR_TITLE` = `pr_title` from JSON
+- `PR_DESCRIPTION` = `pr_description` from JSON
+- `PR_NUMBER` = `pr_number` from JSON
+- `PR_OWNER` = `pr_owner` from JSON
+- `PR_REPO` = `pr_repo` from JSON
+- `HEAD_SHA` = `head_sha` from JSON
 
 #### Build Base Scope Brief
 
@@ -174,8 +168,8 @@ do NOT reuse a previous shuffle.
 
 **Generate a shuffled diff file** (one Bash call per
 agent). This writes the per-file diffs in randomized
-order to a temp file — the orchestrator does NOT read
-the output:
+order to a temp file and prints the shuffled file
+list to stdout:
 
 ```bash
 ${CLAUDE_SKILL_DIR}/scripts/shuffle-diff.sh <TEMP_DIR>/diff-agent-<i>.txt <GIT_DIFF_ARGS>
@@ -186,9 +180,9 @@ the `DIFF_CMD`. For example:
 - Local: `${CLAUDE_SKILL_DIR}/scripts/shuffle-diff.sh /tmp/.../diff-agent-1.txt diff HEAD`
 - PR: `${CLAUDE_SKILL_DIR}/scripts/shuffle-diff.sh /tmp/.../diff-agent-1.txt -C /tmp/.../repo diff abc123..HEAD`
 
-Read only the shuffled file list from a separate
-`<DIFF_CMD> --name-only | shuf` call to build the
-scope brief — do NOT read the diff file contents.
+The script's stdout contains the shuffled file list
+(one file per line) — use this to build the scope
+brief. Do NOT read the diff file contents.
 
 **Build the agent's scope brief** using the same
 fields as the base scope brief, but with the file
@@ -308,20 +302,16 @@ prompt.
 
 **Codex (N instances):** For each instance i (1..N),
 dispatch a general-purpose Agent with
-`mode: "bypassPermissions"`. Use the following
+`mode: "bypassPermissions"` and `model: "sonnet"`.
+Use the following
 prompt (substitute variables):
 
 ```
-Run the following command and return its complete
-stdout. If the command fails, return the stderr
-output instead.
+Run this bash command with timeout 600000 and return its output.
 
-codex exec -m gpt-5.4 \
-  --config model_reasoning_effort="high" \
-  --sandbox read-only \
-  --full-auto \
-  -C <WORK_DIR> \
-  < <TEMP_DIR>/prompt-agent-<i>.txt
+${CLAUDE_SKILL_DIR}/scripts/run-codex-reviewer.sh gpt-5.4 high <WORK_DIR> <TEMP_DIR>/prompt-agent-<i>.txt <TEMP_DIR>/codex-stderr-<i>.txt
+
+If it fails, return the last 20 lines of <TEMP_DIR>/codex-stderr-<i>.txt.
 ```
 
 ### Step 5: Collect and Merge Findings
@@ -414,16 +404,7 @@ for all file reads and git -C for all git commands.
 The judge returns structured FINDING blocks, not
 formatted markdown.
 
-### Step 7: Cleanup
-
-```
-rm -rf <TEMP_DIR>
-```
-
-Always run cleanup, even if the review pipeline
-fails at any earlier step.
-
-## Output Format
+### Step 7: Format and Present Findings
 
 You are responsible for ALL formatting. Agents
 return structured text (FINDING / FILE / LINES /
@@ -481,6 +462,70 @@ findings. Only present high and medium severity.
   omit `Codex findings:` count
 - No findings: display `No material issues found.`
 
+### Step 8: Post Findings to PR
+
+Skip this step if not in PR mode or if there are no
+presentable findings (confirmed/uncertain, high/medium
+severity).
+
+#### Ask which findings to post
+
+Use `AskUserQuestion`: "Post findings as inline PR
+comments?"
+- **All** — post every finding shown above
+- **Select** — choose specific findings by number
+- **Skip** — don't post
+
+If the user selects "Select", use a follow-up
+`AskUserQuestion` asking for comma-separated finding
+numbers (e.g. "1,3,5").
+
+#### Post each finding individually
+
+Post one at a time so a failure on one does not
+block the rest. Use the start line from the
+finding's `LINES` field (e.g. `42-58` → line=42,
+single `42` → line=42).
+
+Pass the comment body via heredoc on stdin. Use a
+single-quoted delimiter (`<<'EOF'`) so the shell
+does not interpolate the body:
+
+```
+${CLAUDE_SKILL_DIR}/scripts/post-comments.sh \
+  <PR_OWNER> <PR_REPO> <PR_NUMBER> <HEAD_SHA> \
+  <FILE> <START_LINE> <<'EOF'
+**[<SEVERITY>] <CATEGORY>** — <ISSUE>
+
+<DETAIL>
+
+**Recommendation:** <RECOMMENDATION>
+EOF
+```
+
+#### Report results
+
+After all posts complete, report:
+- "Posted N/M findings as inline comments on
+  PR #<PR_NUMBER>"
+- For each failed post: "Finding #X (`file:lines`):
+  failed — <error reason>"
+
+### Step 9: Cleanup
+
+Remove only this session's temp directory — NOT the
+parent `/tmp/review-skill/` directory (other sessions
+may be using it concurrently):
+
+```
+rm -rf <TEMP_DIR>
+```
+
+`<TEMP_DIR>` is the exact path from Step 1 (e.g.
+`/tmp/review-skill/review-XXXXXX`). Always run
+cleanup, even if the review pipeline fails at any
+earlier step.
+
 ## Error Handling
 
 **Partial Codex failure:** Check the agent result for
@@ -512,8 +557,13 @@ the user and stop.
 positive integer, show usage and stop. Clamp values
 outside 1–10 to the nearest bound and warn.
 
-**Cleanup on failure:** Always remove the temp
-directory, even if the review pipeline fails.
+**Cleanup on failure:** Always remove `<TEMP_DIR>`
+(the session directory, not the parent), even if the
+review pipeline fails.
+
+**Comment post fails (422):** Report the specific
+finding that failed and the error. Continue posting
+remaining findings.
 
 ## Examples
 
