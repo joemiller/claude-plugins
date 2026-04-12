@@ -4,7 +4,7 @@ Multi-model code review plugin. Runs Claude and Codex reviewers in parallel, the
 
 ## Architecture
 
-- **Skills** (`pr-review`, `review`, `mega-review`) are pure orchestrators — they dispatch agents and format output, never review code themselves.
+- **Skills** (`pr-review`, `review`) are pure orchestrators — they dispatch agents and format output, never review code themselves. Both support `--agents N` for multi-agent reviews with randomized file ordering.
 - **Agents** (`reviewer`, `judge`) return structured `FINDING:` blocks, not markdown. The skill handles all formatting.
 - Codex is optional. Skills degrade gracefully to Claude-only when the `codex` CLI is unavailable.
 

@@ -15,7 +15,7 @@ plugins/<name>/
 ## Current Plugins
 
 - **review** — Multi-model code review with cross-validation. Runs Claude and Codex reviewers in parallel, then a judge agent validates/deduplicates findings.
-  - Skills: `pr-review` (GitHub PR URL), `review` (local changes/ranges), `mega-review` (multi-agent with randomized context)
+  - Skills: `pr-review` (GitHub PR URL), `review` (local changes/ranges) — both support `--agents N` for multi-agent reviews
   - Agents: `reviewer` (adversarial reviewer, sonnet), `judge` (cross-validates findings, sonnet)
 
 ## Adding a New Plugin
