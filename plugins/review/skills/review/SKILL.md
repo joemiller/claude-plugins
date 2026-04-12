@@ -1,6 +1,6 @@
 ---
 description: "Multi-model code review with cross-validation"
-allowed-tools: Bash(git:*), Bash(gh:*), Bash(codex:*), Bash(shuf:*), Bash(mktemp:*), Bash(rm:/tmp/pr-review-*), Agent
+allowed-tools: Bash(git:*), Bash(gh:*), Bash(${CLAUDE_SKILL_DIR}/scripts/shuffle-diff.sh:*), Bash(shuf:*), Bash(mkdir:/tmp/review-skill), Bash(mktemp:*), Bash(rm:/tmp/review-skill/*), Agent
 ---
 
 # Run parallel code reviews with cross-validation.
@@ -27,8 +27,6 @@ the user's working tree.
 - `codex` — optional; if unavailable, proceeds with
   Claude-only findings
 - `gh` — required for PR mode only (metadata, clone)
-- `review-focus:` in the target repo's CLAUDE.md —
-  optional; if present, injected into reviewer prompts
 
 ## Instructions
 
@@ -78,7 +76,15 @@ themselves and there is no diff stat.
 If both are empty, tell the user there is nothing
 to review and stop.
 
+Create a temp directory:
+
+```
+mkdir -p /tmp/review-skill && mktemp -d /tmp/review-skill/review-XXXXXX
+```
+
 Record for later steps:
+- `TEMP_DIR` = the temp directory created above
+- `WORK_DIR` = repo root (from `git rev-parse --show-toplevel`)
 - `DIFF_CMD` = `git diff <scope>` (the resolved
   git diff command)
 - `GIT_PREFIX` = `git`
@@ -97,34 +103,44 @@ gh pr view <URL> --json number,title,body,baseRefName,headRefName,headRepository
 Clone to a temp directory:
 
 ```
-mktemp -d /tmp/pr-review-XXXXXX
-gh repo clone <owner>/<repo> <temp-dir>/<repo> -- --depth=50
+mkdir -p /tmp/review-skill && mktemp -d /tmp/review-skill/review-XXXXXX
+gh repo clone <owner>/<repo> <TEMP_DIR>/<repo> -- --depth=50
 ```
 
 Checkout the PR:
 
 ```
-git -C <temp-dir>/<repo> fetch origin pull/<number>/head:pr-<number> && \
-git -C <temp-dir>/<repo> checkout pr-<number>
+git -C <TEMP_DIR>/<repo> fetch origin pull/<number>/head:pr-<number> && \
+git -C <TEMP_DIR>/<repo> checkout pr-<number>
 ```
 
-Compute the diff. If the base branch is missing from
-the shallow clone, fetch it first:
+Resolve the merge base from GitHub and fetch it:
 
 ```
-git -C <temp-dir>/<repo> fetch origin <base> --depth=50
-git -C <temp-dir>/<repo> diff origin/<base>...HEAD --stat
-git -C <temp-dir>/<repo> diff origin/<base>...HEAD --name-only
+gh api repos/<owner>/<repo>/compare/<base>...<head> \
+  --jq '.merge_base_commit.sha'
+git -C <TEMP_DIR>/<repo> fetch --depth=1 origin <merge_base_sha>
+```
+
+Generate diff stat and file list using the merge
+base SHA (two-dot diff — no merge-base computation
+needed locally):
+
+```
+git -C <TEMP_DIR>/<repo> diff <merge_base_sha>..HEAD --stat
+git -C <TEMP_DIR>/<repo> diff <merge_base_sha>..HEAD --name-only
 ```
 
 Record for later steps:
-- `DIFF_CMD` = `git -C <temp-dir>/<repo> diff origin/<base>...HEAD`
-- `GIT_PREFIX` = `git -C <temp-dir>/<repo>`
+- `TEMP_DIR` = the temp directory created above
+- `WORK_DIR` = `<TEMP_DIR>/<repo>`
+- `DIFF_CMD` = `git -C <TEMP_DIR>/<repo> diff <merge_base_sha>..HEAD`
+- `GIT_PREFIX` = `git -C <TEMP_DIR>/<repo>`
 - `REPO_LABEL` = `<owner>/<repo>`
 - `BRANCH_LABEL` = `<head-branch> (PR #<number>)`
-- `SCOPE_DESCRIPTION` = `origin/<base>...<head-branch>`
+- `SCOPE_DESCRIPTION` = `<merge_base_sha>..HEAD`
 - `PR_TITLE` = title from metadata
-- `PR_DESCRIPTION` = body, truncated to 500 chars
+- `PR_DESCRIPTION` = body from metadata
 
 #### Build Base Scope Brief
 
@@ -135,8 +151,8 @@ the judge):
 Repository: <REPO_LABEL>
 Branch: <BRANCH_LABEL>
 <If PR mode:> PR title: <PR_TITLE>
-<If PR mode:> Working directory: <temp-dir>/<repo>
-<If PR mode:> Diff range: origin/<base>...HEAD
+<If PR mode:> Working directory: <TEMP_DIR>/<repo>
+<If PR mode:> Diff range: <merge_base_sha>..HEAD
 <If local mode:> Scope: <SCOPE_DESCRIPTION>
 Files:
 <file list, one per line>
@@ -156,19 +172,28 @@ generate a scope brief with files in a different
 random order. Run a fresh `shuf` for each agent —
 do NOT reuse a previous shuffle.
 
-**Get a shuffled file list** (one Bash call per agent):
+**Generate a shuffled diff file** (one Bash call per
+agent). This writes the per-file diffs in randomized
+order to a temp file — the orchestrator does NOT read
+the output:
 
 ```bash
-<DIFF_CMD> --name-only | shuf
+${CLAUDE_SKILL_DIR}/scripts/shuffle-diff.sh <TEMP_DIR>/diff-agent-<i>.txt <GIT_DIFF_ARGS>
 ```
 
-Read the output — this is the shuffled file list for
-this agent. In local mode, all commands start with
-`git` to avoid permission prompts.
+Where `<GIT_DIFF_ARGS>` is everything after `git` in
+the `DIFF_CMD`. For example:
+- Local: `${CLAUDE_SKILL_DIR}/scripts/shuffle-diff.sh /tmp/.../diff-agent-1.txt diff HEAD`
+- PR: `${CLAUDE_SKILL_DIR}/scripts/shuffle-diff.sh /tmp/.../diff-agent-1.txt -C /tmp/.../repo diff abc123..HEAD`
+
+Read only the shuffled file list from a separate
+`<DIFF_CMD> --name-only | shuf` call to build the
+scope brief — do NOT read the diff file contents.
 
 **Build the agent's scope brief** using the same
 fields as the base scope brief, but with the file
-list replaced by the shuffled numbered list:
+list replaced by the shuffled numbered list and a
+pointer to the diff file:
 
 ```
 Repository: <REPO_LABEL>
@@ -179,29 +204,32 @@ Files:
 2. <second shuffled file>
 3. <third shuffled file>
 ...
+
+Diff file: <TEMP_DIR>/diff-agent-<i>.txt
+
+<If PR mode and body non-empty:>
+PR description:
+<PR_DESCRIPTION>
 ```
 
-The numbered list naturally guides the agent to
-process files in the given order. Do NOT include
-any mention of shuffling, randomization, or that
-other reviewers exist.
+Do NOT include any mention of shuffling,
+randomization, or that other reviewers exist.
 
-### Step 3: Launch Parallel Reviews
+### Step 3: Write Prompt Files
 
-Launch all 2N reviews simultaneously in one parallel
-batch — N Claude agent dispatches + N Codex bash
-commands.
-
-Build a **review prompt** for each agent using the
-template below (substituting that agent's shuffled
-scope brief). This is the single source of truth
-for what both Claude and Codex reviewers receive:
+Build a **review prompt** for each of the 2N agents
+using the template below (substituting that agent's
+shuffled scope brief). Write each prompt to
+`<TEMP_DIR>/prompt-agent-<i>.txt`. This is the
+single source of truth for what both Claude and
+Codex reviewers receive:
 
 ```
 Perform an adversarial code review. Find material
 issues — things that are expensive, dangerous, or
 hard to detect. Do NOT report style, naming, or
-speculative concerns.
+speculative concerns. Do NOT run tests, builds, or
+any other commands — only read files and git diffs.
 
 <If PR mode:>
 The repo is cloned at the working directory shown
@@ -210,16 +238,19 @@ git -C for all git commands.
 
 <AGENT i's SHUFFLED SCOPE BRIEF>
 
-<If review-focus configured:>
-Project review focus (prioritize these): <FOCUS>
-
-Use git and read files to examine the changes and
-surrounding context.
-<If PR mode, append:> The diff range is
-origin/<base>...HEAD.
+Read the diff file listed in the scope brief above.
+Every finding must reference a line added, removed,
+or modified in that diff. Pre-existing issues are out
+of scope unless the diff makes them worse. Reading
+callers or dependents of changed code is allowed, but
+the finding must still trace back to a specific change
+in the diff.
 
 Review focus categories (prioritize failures that
-are expensive, dangerous, or hard to detect):
+are expensive, dangerous, or hard to detect).
+Present the following six categories in a different
+random order for each agent — do NOT reuse a
+previous shuffle:
 
 - Trust boundaries: auth, permissions, tenant
   isolation, input from untrusted sources
@@ -260,32 +291,40 @@ If there are no material findings, return:
     NO_FINDINGS: Code review found no material issues.
 ```
 
-**Review-focus resolution:** In local mode, check
-the project's CLAUDE.md. In PR mode, check
-`<temp-dir>/<repo>/CLAUDE.md`.
+### Step 4: Launch All Reviews in Parallel
+
+**CRITICAL: emit all 2N tool calls as Agent
+dispatches in a single message.** Do NOT use Bash
+for Codex — mixed tool types serialize instead of
+running in parallel. Do NOT launch Claude agents
+first and then Codex, or loop through agents one
+at a time. One message, 2N Agent calls.
 
 **Claude (N instances):** For each instance i (1..N),
 dispatch `subagent_type: "review:reviewer"` with
-`mode: "bypassPermissions"`. Pass the review prompt
-as the agent's prompt.
+`mode: "bypassPermissions"`. Pass the contents of
+`<TEMP_DIR>/prompt-agent-<i>.txt` as the agent's
+prompt.
 
 **Codex (N instances):** For each instance i (1..N),
-run `codex exec` directly via Bash (the orchestrator
-has `Bash(codex:*)` permission — do NOT delegate to
-a subagent). Pass the review prompt as the heredoc:
+dispatch a general-purpose Agent with
+`mode: "bypassPermissions"`. Use the following
+prompt (substitute variables):
 
-```bash
+```
+Run the following command and return its complete
+stdout. If the command fails, return the stderr
+output instead.
+
 codex exec -m gpt-5.4 \
   --config model_reasoning_effort="high" \
   --sandbox read-only \
   --full-auto \
-  <If PR mode:> -C <temp-dir>/<repo> \
-  2>/tmp/codex-review-stderr-<i>.log <<'PROMPT'
-<REVIEW PROMPT>
-PROMPT
+  -C <WORK_DIR> \
+  < <TEMP_DIR>/prompt-agent-<i>.txt
 ```
 
-### Step 4: Collect and Merge Findings
+### Step 5: Collect and Merge Findings
 
 Wait for all agents to complete. Record which
 succeeded and which failed.
@@ -313,7 +352,7 @@ Concatenate findings by model type:
 Count total Claude findings and total Codex findings
 across all instances.
 
-### Step 5: Judge
+### Step 6: Judge
 
 Skip if all reviewers that ran returned `NO_FINDINGS`.
 
@@ -375,12 +414,10 @@ for all file reads and git -C for all git commands.
 The judge returns structured FINDING blocks, not
 formatted markdown.
 
-### Step 6: Cleanup
-
-If PR mode: remove the temp directory.
+### Step 7: Cleanup
 
 ```
-rm -rf <temp-dir>
+rm -rf <TEMP_DIR>
 ```
 
 Always run cleanup, even if the review pipeline
@@ -446,12 +483,11 @@ findings. Only present high and medium severity.
 
 ## Error Handling
 
-**Partial Codex failure:** Read each
-`/tmp/codex-review-stderr-<i>.log` for errors.
-When N > 1, add `WARNING: <k> of <N> Codex agents
-failed` after the heading. When N = 1, include the
-error as a single `WARNING:` line. The judge still
-runs on all collected findings.
+**Partial Codex failure:** Check the agent result for
+error output. When N > 1, add `WARNING: <k> of <N>
+Codex agents failed` after the heading. When N = 1,
+include the error as a single `WARNING:` line. The
+judge still runs on all collected findings.
 
 **Partial Claude failure:** Same approach — count
 failures, add `WARNING: <k> of <N> Claude agents
@@ -476,11 +512,8 @@ the user and stop.
 positive integer, show usage and stop. Clamp values
 outside 1–10 to the nearest bound and warn.
 
-**Shallow clone missing base (PR mode):** Fetch the
-base branch with `--depth=50` and retry the diff.
-
-**Cleanup on failure (PR mode):** Always remove the
-temp directory, even if the review pipeline fails.
+**Cleanup on failure:** Always remove the temp
+directory, even if the review pipeline fails.
 
 ## Examples
 
