@@ -439,7 +439,7 @@ findings. Only present high and medium severity.
 
     **Fix:** Recommendation from the finding.
 
-    *Confirmed by both reviewers*
+    *Confirmed by N Claude reviewers + M Codex reviewers*
 
 **Status column** (from judge's STATUS/CONFIRMED_BY):
 - confirmed + both → `✓ both`
@@ -500,6 +500,8 @@ ${CLAUDE_SKILL_DIR}/scripts/post-comments.sh \
 <DETAIL>
 
 **Recommendation:** <RECOMMENDATION>
+
+*Confirmed by N Claude reviewers + M Codex reviewers*
 EOF
 ```
 
