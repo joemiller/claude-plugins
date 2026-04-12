@@ -30,7 +30,6 @@ review code, edit files, or inject your own opinions.
 ### Step 1: Setup and Scope
 
 Parse `$ARGUMENTS`:
-- Strip `--quick` flag if present; record as boolean.
 - Strip `--agents N` flag if present; record N
   (minimum 1, maximum 10).
 - If `--agents` is not specified, ask the user using
@@ -253,8 +252,7 @@ across all instances.
 
 ### Step 5: Judge
 
-Skip if `--quick` is set, or all reviewers that ran
-returned `NO_FINDINGS`.
+Skip if all reviewers that ran returned `NO_FINDINGS`.
 
 Dispatch `subagent_type: "review:judge"` with
 `mode: "bypassPermissions"`.
@@ -374,8 +372,6 @@ present high and medium severity.
 - *Uncertain: reason*
 
 **Variations:**
-- `--quick`: append `[quick]` to heading, omit
-  Status column (no judge ran)
 - Codex failed: add `WARNING:` line after title,
   omit `Codex findings:` count
 - No findings: display `No material issues found.`
@@ -424,6 +420,3 @@ Input: `/review:pr-review --agents 1 https://github.com/org/repo/pull/42`
 
 Input: `/review:pr-review --agents 3 https://github.com/org/repo/pull/42`
 (3 Claude + 3 Codex agents)
-
-Input: `/review:pr-review --quick https://github.com/org/repo/pull/42`
-(asks user for agent count, skip judge)

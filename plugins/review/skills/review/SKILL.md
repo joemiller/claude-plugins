@@ -28,7 +28,6 @@ own opinions.
 ### Step 1: Determine Scope
 
 Parse `$ARGUMENTS`:
-- Strip `--quick` flag if present; record as boolean.
 - Strip `--agents N` flag if present; record N
   (minimum 1, maximum 10).
 - If `--agents` is not specified, ask the user using
@@ -233,8 +232,7 @@ across all instances.
 
 ### Step 5: Judge
 
-Skip if `--quick` is set, or all reviewers that ran
-returned `NO_FINDINGS`.
+Skip if all reviewers that ran returned `NO_FINDINGS`.
 
 Dispatch `subagent_type: "review:judge"` with
 `mode: "bypassPermissions"`.
@@ -332,8 +330,6 @@ etc. blocks). Parse these and render markdown.
 - *Uncertain: reason*
 
 **Variations:**
-- `--quick`: append `[quick]` to heading, omit
-  Status column (no judge ran)
 - Codex failed: add `WARNING:` line after heading,
   omit `Codex findings:` count
 - No findings: display `No material issues found.`
@@ -377,8 +373,5 @@ Input: `/review:review --agents 1`
 Input: `/review:review --agents 3 HEAD~3..HEAD`
 (3 Claude + 3 Codex agents, reviews last 3 commits)
 
-Input: `/review:review --quick --agents 2`
-(2+2 agents, no judge, reviews uncommitted changes)
-
-Input: `/review:review --quick src/server.go`
-(asks user for agent count, quick review of one file)
+Input: `/review:review --agents 2 src/server.go`
+(2+2 agents, reviews one file)
